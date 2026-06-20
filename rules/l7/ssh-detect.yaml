@@ -1,0 +1,10 @@
+id: L7-SSH-DETECT
+name: "SSH Protocol Detection"
+description: "Detecta el servicio SSH leyendo el banner de bienvenida pasivamente de forma segura."
+severity: info
+protocol: tcp
+port: 22
+# No payloads, SSH sends its banner upon connection natively.
+matchers:
+  - type: regex
+    value: "SSH-"

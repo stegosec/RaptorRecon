@@ -1,0 +1,11 @@
+id: L7-REDIS-PING
+name: "Redis Ping Protocol"
+description: "Detecta servidores Redis interactuando con el protocolo texto en crudo usando el comando PING."
+severity: info
+protocol: tcp
+port: 6379
+payloads:
+  - "PING\r\n"
+matchers:
+  - type: regex
+    value: "\\+PONG"

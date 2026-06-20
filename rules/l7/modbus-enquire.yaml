@@ -1,0 +1,11 @@
+id: L7-MODBUS-ENQUIRE
+name: "Modbus/TCP Protocol Query"
+description: "Detecta controladores industriales (PLC) y dispositivos ICS enviando una trama Modbus estándar."
+severity: info
+protocol: tcp
+port: 502
+payloads:
+  - "00010000000601030000000a" # Modbus TransID=1, Proto=0, Len=6, UnitID=1, Func=3 (Read Holding Regs)
+matchers:
+  - type: hex
+    value: "00010000" # Modbus TCP Response Header (TransID 0001, Proto 0000)

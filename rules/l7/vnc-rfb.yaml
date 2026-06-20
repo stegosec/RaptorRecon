@@ -1,0 +1,11 @@
+id: L7-VNC-RFB
+name: "VNC RFB Protocol Handshake"
+description: "Detecta servidores VNC inyectando la cadena RFB e iniciando el handshake inicial."
+severity: info
+protocol: tcp
+port: 5900
+payloads:
+  - "RFB 003.008\n"
+matchers:
+  - type: regex
+    value: "^RFB 00"

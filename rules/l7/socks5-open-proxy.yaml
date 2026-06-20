@@ -1,0 +1,14 @@
+id: L7-SOCKS5-OPEN-PROXY
+name: "SOCKS5 Open Proxy — Sin Autenticación"
+description: >
+  El servidor SOCKS5 en puerto 1080 acepta conexiones sin requerir autenticación
+  (negocia METHOD=0x00). Permite tunelizar tráfico TCP arbitrario sin credenciales,
+  habilitando SSRF, bypass de controles perimetrales y exfiltración de datos.
+severity: critical
+protocol: tcp
+port: 1080
+payloads:
+  - "050100"
+matchers:
+  - type: hex
+    value: "0500"

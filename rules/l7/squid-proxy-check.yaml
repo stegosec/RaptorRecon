@@ -1,0 +1,16 @@
+id: L7-SQUID-OPEN-PROXY
+name: "Squid Open HTTP Proxy Verification"
+description: >
+  Verifica si el proxy HTTP acepta peticiones CONNECT arbitrarias a destinos externos,
+  indicando que es un Open Proxy abusable para SSRF, exfiltración de datos y bypass
+  de controles perimetrales. Un CONNECT exitoso a google.com:443 confirma la exposición.
+severity: critical
+protocol: tcp
+port: 3128
+payloads:
+  - "CONNECT google.com:443 HTTP/1.1\r\nHost: google.com:443\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+matchers:
+  - type: regex
+    value: "HTTP/1\\.[01] 200"
+  - type: contains
+    value: "Connection established"

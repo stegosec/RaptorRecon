@@ -1,0 +1,13 @@
+id: L7-RDP-X224
+name: "RDP X.224 Connection Request"
+description: "Detecta RDP inyectando un payload X.224 y validando la respuesta binaria pura."
+severity: info
+protocol: tcp
+port: 3389
+payloads:
+  - "030000130ee000000000000100080000000000" # TPKT X.224 Connection Request
+matchers:
+  - type: hex
+    value: "03000013" # Cabecera TPKT de respuesta RDP estándar
+  - type: hex
+    value: "0d"       # CC (Connection Confirm) byte en el protocolo X.224

@@ -1,0 +1,11 @@
+id: L7-MYSQL-DETECT
+name: "MySQL Server Detection"
+description: "Detecta servidores MySQL mandando un dummy packet vacío para forzar el handshake inicial del servidor."
+severity: info
+protocol: tcp
+port: 3306
+payloads:
+  - "00000000" # Dummy 4 byte packet
+matchers:
+  - type: regex
+    value: "(?i)(mysql|mariadb)"

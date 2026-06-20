@@ -1,0 +1,1414 @@
+version: "2.0"
+name: "Raptor Recon — Elite ASM Ruleset"
+author: "raptor-recon"
+changelog:
+  - version: "2.0"
+    date: "2025-05-31"
+    changes:
+      - "Añadidos campos context (external|internal|both) y confidence (low|medium|high|confirmed) a todas las reglas"
+      - "Corregidas severidades inconsistentes: SMB, GitLab, RR-112"
+      - "Mejorada lógica match de RR-112 (honeypot) para reducir falsos positivos masivos"
+      - "Añadidas reglas faltantes: Consul, Airflow, Jupyter, Portainer, Argo CD, Vault Agent"
+      - "Añadidas reglas ICS/SCADA: DNP3, BACnet, OPC-UA, EtherNet/IP"
+      - "Documentado comportamiento del campo services (fingerprint por banner+puerto)"
+      - "Nuevas categorías: Orquestación de Contenedores, Data Science, Backup & Storage"
+      - "Añadido campo cvss_base donde aplica"
+      - "Añadidas reglas de detección combinada (logic: and) más precisas"
+
+# ──────────────────────────────────────────────────────────────
+# SCHEMA — Descripción de campos
+# ──────────────────────────────────────────────────────────────
+# id:          Identificador único de regla (formato RR-NNN)
+# name:        Nombre descriptivo corto
+# description: Explicación del riesgo
+# severity:    critical | high | medium | low | info
+# context:     external (ASM perimetral) | internal (red LAN/segmento) | both
+# confidence: high | medium | high  — estimación de ruido esperado
+# cvss_base:   Puntuación CVSS 3.1 de referencia (optional)
+# tags:        Lista de etiquetas para filtrado y agrupación
+# match:
+#   logic:     or  → basta con que UNO de los criterios coincida
+#              and → TODOS los criterios deben coincidir (más preciso, menos FP)
+#   ports:     Lista de puertos TCP/UDP a detectar
+#   banners:   Cadenas a buscar en el banner del servicio (case-insensitive)
+#   services:  Fingerprint por combinación de banner + puerto (resolución interna del motor)
+#              El motor compara el servicio detectado por nmap/zgrab2 con estos identificadores.
+#              Si el motor no soporta services[], se ignora silenciosamente (no falla).
+#   http_paths: Rutas HTTP a verificar con GET (solo si el servicio es HTTP/HTTPS)
+#   conditions: Lista de condiciones adicionales compuestas (AND sobre el bloque)
+# remediation: Pasos concretos de mitigación
+# references:  CVEs o URLs relevantes (optional)
+# ──────────────────────────────────────────────────────────────
+
+rules:
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 1 — Baseline Fundacional
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-001
+    name: Telnet Expuesto
+    description: >
+      Telnet transmite credenciales y datos en texto claro. Cualquier atacante
+      con acceso a la red puede capturar sesiones completas.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.8
+    tags: [exposure, cleartext, legacy, baseline]
+    match:
+      logic: or
+      ports: [23]
+      services: [telnet]
+      banners: ["login:", "Password:", "Telnet"]
+    remediation: >
+      Deshabilitar Telnet completamente. Migrar a SSH con autenticación por clave
+      ED25519 o RSA-4096. Si existe un dispositivo legacy que solo soporta Telnet,
+      aislar en VLAN restringida con acceso solo desde jump host.
+    references:
+      - "https://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=telnet"
+
+  - id: RR-002
+    name: SMB Expuesto al Perímetro
+    description: >
+      Puerto 445/SMB accesible desde redes no confiables. Vector principal de
+      ransomware (WannaCry, NotPetya) y movimiento lateral. EternalBlue y
+      variantes siguen activas en campañas.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 10.0
+    tags: [smb, exposure, ransomware, baseline]
+    match:
+      logic: or
+      ports: [445, 139]
+      services: [smb, netbios-ssn]
+    remediation: >
+      Bloquear puertos 445 y 139 en el firewall perimetral de forma absoluta.
+      Internamente: segmentar, habilitar SMB Signing y deshabilitar SMBv1.
+    references:
+      - "CVE-2017-0144 (EternalBlue)"
+      - "CVE-2020-0796 (SMBGhost)"
+
+  - id: RR-002-INT
+    name: SMBv1 Activo en Red Interna
+    description: >
+      SMBv1 habilitado en red interna. Aunque no esté expuesto al perímetro,
+      permite movimiento lateral y es el vector de EternalBlue en redes LAN.
+    severity: high
+    context: internal
+    confidence: medium
+    tags: [smb, lateral-movement, legacy, baseline]
+    match:
+      logic: and
+      ports: [445]
+      banners: ["NT LM 0.12", "SMB 1.0"]
+    remediation: >
+      Deshabilitar SMBv1 via GPO: Set-SmbServerConfiguration -EnableSMB1Protocol $false.
+      Habilitar SMB Signing obligatorio. Segmentar workstations de servidores.
+
+  - id: RR-003
+    name: RDP Expuesto Directamente a Internet
+    description: >
+      RDP accesible sin VPN ni jump host intermedio. Objetivo principal de ataques
+      de fuerza bruta, BlueKeep y credenciales comprometidas en dark web.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [rdp, exposure, bruteforce, baseline]
+    match:
+      logic: or
+      ports: [3389]
+      services: [rdp]
+      banners: ["MSTSC", "RDP"]
+    remediation: >
+      Implementar VPN obligatoria antes de RDP. Habilitar NLA (Network Level
+      Authentication). Configurar Account Lockout Policy. Considerar RDP Gateway
+      con MFA. Cambiar puerto solo como medida de oscuridad (no suficiente).
+    references:
+      - "CVE-2019-0708 (BlueKeep)"
+      - "CVE-2019-1182 (DejaBlue)"
+
+  - id: RR-004
+    name: FTP Expuesto — Credenciales en Claro
+    description: >
+      FTP transmite usuario, contraseña y datos sin cifrado. MITM trivial en
+      cualquier red compartida.
+    severity: high
+    context: both
+    confidence: high
+    tags: [ftp, cleartext, exposure, baseline]
+    match:
+      logic: or
+      ports: [21, 20]
+      services: [ftp]
+      banners: ["FTP", "vsftpd", "ProFTPD", "FileZilla"]
+    remediation: >
+      Migrar a SFTP (SSH puerto 22) o FTPS con TLS obligatorio. Si FTPS,
+      deshabilitar modos explícito sin TLS. Bloquear FTP anónimo.
+
+  - id: RR-005
+    name: SNMP v1/v2 con Community String Pública
+    description: >
+      SNMP versiones 1 y 2c transmiten community strings en texto claro y
+      con 'public'/'private' por defecto. Permite enumeración completa de
+      la topología de red y en algunos casos escritura de configuración.
+    severity: high
+    context: both
+    confidence: medium
+    tags: [snmp, exposure, enumeration, baseline]
+    match:
+      logic: or
+      ports: [161, 162]
+      services: [snmp]
+    remediation: >
+      Migrar a SNMPv3 con autenticación SHA y cifrado AES. Cambiar community
+      strings a valores no triviales. Filtrar acceso UDP 161/162 a IPs de NMS
+      autorizadas únicamente. Deshabilitar SNMP en dispositivos que no lo necesiten.
+
+  - id: RR-006
+    name: VNC Expuesto
+    description: >
+      Acceso gráfico VNC expuesto. Frecuentemente con contraseñas débiles,
+      versiones vulnerables o sin autenticación. Permite control total del escritorio.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [vnc, remote-access, exposure, baseline]
+    match:
+      logic: or
+      ports: [5900, 5901, 5902, 5903]
+      banners: ["RFB 003", "RFB 004", "RFB 005"]
+    remediation: >
+      Nunca exponer VNC directamente. Tunelizar siempre sobre SSH o VPN.
+      Habilitar autenticación VeNCrypt. Considerar migración a soluciones
+      con MFA como Apache Guacamole detrás de proxy inverso.
+
+  - id: RR-007
+    name: LDAP Expuesto — Posible Enumeración AD
+    description: >
+      Puerto LDAP accesible. Permite enumeración de usuarios, grupos, políticas
+      y estructura de Active Directory sin autenticación en configuraciones por defecto.
+    severity: high
+    context: external
+    confidence: medium
+    tags: [ldap, activedirectory, enumeration, baseline]
+    match:
+      logic: or
+      ports: [389, 636, 3268, 3269]
+      services: [ldap, ldaps]
+    remediation: >
+      Bloquear LDAP perimetral excepto en casos justificados. Habilitar LDAPS (636).
+      Deshabilitar LDAP anonymous bind. Implementar LDAP Channel Binding y
+      LDAP Signing (KB4520412). Segmentar Domain Controllers en VLAN dedicada.
+
+  - id: RR-008
+    name: NTP — Riesgo de Amplificación DDoS
+    description: >
+      Servidor NTP público con comando monlist habilitado. Puede ser abusado
+      como amplificador en ataques DDoS (factor de amplificación x200-600).
+    severity: medium
+    context: external
+    confidence: medium
+    tags: [ntp, udp, ddos, amplification, baseline]
+    match:
+      logic: or
+      ports: [123]
+      services: [ntp]
+    remediation: >
+      Deshabilitar monlist: "restrict default noquery nopeer nomodify notrap".
+      Actualizar ntpd a versión >=4.2.7p26. Filtrar UDP 123 entrante desde internet.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 2 — DevOps e Infraestructura Cloud
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-050
+    name: HashiCorp Vault API Expuesta
+    description: >
+      Vault almacena secretos críticos (tokens, certificados, credenciales de DB).
+      Exposición pública equivale a comprometer todos los secretos gestionados.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 10.0
+    tags: [vault, devops, secrets]
+    match:
+      logic: or
+      ports: [8200]
+      banners: ["Vault", "X-Vault-Request-Id"]
+      http_paths: ["/v1/sys/health", "/v1/sys/seal-status"]
+    remediation: >
+      Restringir Vault a red interna o VLAN dedicada de secretos. Requerir
+      TLS mutual (mTLS). Habilitar Vault Audit Log. Usar namespaces y políticas
+      de mínimo privilegio. Jamás exponer puerto 8200 al perímetro.
+
+  - id: RR-050b
+    name: Vault Agent / Vault Sidecars Expuestos
+    description: >
+      Puerto de Vault Agent o sidecars Kubernetes accesible. Puede exponer
+      tokens de corta duración o paths de autenticación.
+    severity: high
+    context: internal
+    confidence: medium
+    tags: [vault, devops, kubernetes, secrets]
+    match:
+      logic: or
+      ports: [8007, 8100, 8101]
+      banners: ["vault-agent"]
+    remediation: >
+      Restringir vault-agent listener a Unix socket local. No exponer puerto
+      TCP del agente en entornos multi-tenant.
+
+  - id: RR-051
+    name: Etcd Cluster Management Expuesto
+    description: >
+      Etcd almacena todo el estado del cluster Kubernetes incluyendo secretos,
+      configuraciones y tokens. Acceso sin autenticación = acceso root al cluster.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 10.0
+    tags: [etcd, devops, kubernetes, secrets]
+    match:
+      logic: or
+      ports: [2379, 2380]
+      http_paths: ["/v3/cluster/member/list", "/health"]
+    remediation: >
+      Comunicación etcd exclusivamente con TLS mutual (peer-cert-file, key-file,
+      trusted-ca-file). Restringir a nodos del plano de control con firewall.
+      Habilitar etcd --client-cert-auth=true. Cifrar secretos en reposo
+      (EncryptionConfiguration en Kubernetes).
+
+  - id: RR-052
+    name: Kubernetes API Server Expuesto
+    description: >
+      kube-apiserver accesible desde el exterior. El kubelet (10250) expuesto
+      permite ejecución de comandos en pods sin autenticación en versiones antiguas.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [kubernetes, api, devops, rce]
+    match:
+      logic: and
+      ports: [6443, 10250, 10255, 8080]
+      banners: ["Kubernetes", "kube-apiserver", "k8s"]
+      http_paths: ["/api/v1/namespaces", "/version"]
+    remediation: >
+      kube-apiserver: deshabilitar --insecure-port=0. Habilitar RBAC.
+      Kubelet: --anonymous-auth=false, --authorization-mode=Webhook.
+      Proteger detrás de VPN o allowlist de IPs. Auditar RBAC regularmente.
+    references:
+      - "CVE-2018-1002105 (Kubernetes privilege escalation)"
+      - "CVE-2022-0185"
+
+  - id: RR-052b
+    name: Kubernetes Dashboard Expuesto
+    description: >
+      Kubernetes Dashboard accesible sin autenticación. Permitía acceso
+      cluster-admin en versiones anteriores a 2.0.
+    severity: critical
+    context: external
+    confidence: high
+    tags: [kubernetes, dashboard, devops]
+    match:
+      logic: and
+      ports: [8001, 8443, 30000]
+      banners: ["Kubernetes Dashboard"]
+      http_paths: ["/api/v1/namespaces/kubernetes-dashboard/services"]
+    remediation: >
+      Deshabilitar acceso anónimo al Dashboard. Requerir token de ServiceAccount
+      con permisos mínimos. Exponer solo via kubectl proxy o ingress con OAuth2 proxy.
+    references:
+      - "Tesla cryptojacking incident 2018"
+
+  - id: RR-053
+    name: Docker API Expuesta Sin TLS
+    description: >
+      Docker daemon expuesto en TCP. Sin TLS permite a cualquier cliente ejecutar
+      contenedores con privilegios, montar el filesystem host y obtener RCE total.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 10.0
+    tags: [docker, devops, rce]
+    match:
+      logic: or
+      ports: [2375]
+      banners: ["Docker"]
+      http_paths: ["/v1.41/info", "/_ping"]
+    remediation: >
+      Bloquear puerto 2375 completamente. Usar solo socket Unix /var/run/docker.sock
+      con permisos estrictos. Si se requiere TCP, usar 2376 con mTLS obligatorio.
+      Considerar rootless Docker o Podman.
+    references:
+      - "CVE-2019-5736 (runc escape)"
+
+  - id: RR-053b
+    name: Docker API con TLS (Puerto 2376)
+    description: >
+      Docker API en puerto TLS detectado. Si los certificados cliente no se
+      validan correctamente, puede ser vulnerable.
+    severity: medium
+    context: external
+    confidence: high
+    tags: [docker, devops]
+    match:
+      logic: and
+      ports: [2376]
+      banners: ["Docker"]
+    remediation: >
+      Verificar que --tlsverify esté habilitado y que --tlscacert valide
+      certificados cliente. Revisar que no se acepten conexiones sin certificado.
+
+  - id: RR-054
+    name: Jenkins CI/CD Expuesto
+    description: >
+      Jenkins accesible. Sin autenticación permite ejecución de código Groovy
+      arbitrario via Script Console. Con autenticación, vulnerabilidades 1-day
+      son frecuentes y explotadas activamente.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [jenkins, devops, ci-cd, rce]
+    match:
+      logic: or
+      banners: ["X-Jenkins", "Hudson"]
+      http_paths: ["/script", "/scriptText", "/manage"]
+    remediation: >
+      Habilitar autenticación obligatoria. Deshabilitar CLI remoto (-Djenkins.CLI.disabled=true).
+      Proteger detrás de VPN o WAF. Actualizar Jenkins y plugins semanalmente.
+      Revisar permisos de jobs y restricción de scripts con Script Security Plugin.
+    references:
+      - "CVE-2024-23897 (Jenkins arbitrary file read)"
+      - "CVE-2019-1003000"
+
+  - id: RR-055
+    name: GitLab / Gitea Expuesto
+    description: >
+      Repositorios de código fuente accesibles. Riesgo de filtración de código,
+      secretos hardcodeados, pipelines CI/CD y tokens de acceso. Registro abierto
+      puede permitir acceso a repositorios "privados" mal configurados.
+    severity: high
+    context: external
+    confidence: high
+    tags: [gitlab, gitea, devops, secrets]
+    match:
+      logic: or
+      banners: ["GitLab", "Gitea", "Gogs"]
+      http_paths: ["/users/sign_in", "/explore/repos", "/-/health"]
+    remediation: >
+      Deshabilitar registro público. Habilitar SSO con MFA obligatorio.
+      Auditar repositorios públicos accidentales. Implementar secret scanning
+      (GitLab Ultimate o Gitleaks en CI). Restringir a red corporativa o VPN.
+
+  - id: RR-056
+    name: SonarQube Expuesto
+    description: >
+      SonarQube con acceso público puede exponer análisis de código con
+      vulnerabilidades, secretos detectados en código, y configuración de proyectos.
+    severity: high
+    context: external
+    confidence: high
+    tags: [sonarqube, devops, secrets]
+    match:
+      logic: or
+      banners: ["SonarQube"]
+      http_paths: ["/api/system/status", "/api/users/search"]
+    remediation: >
+      Deshabilitar acceso anónimo (sonar.forceAuthentication=true). Requerir
+      autenticación para todos los perfiles. Restringir a red interna.
+      Rotar tokens de acceso periódicamente.
+
+  - id: RR-057
+    name: Prometheus Metrics Expuesto
+    description: >
+      Endpoint /metrics de Prometheus expuesto. Fuga de topología interna,
+      IPs, nombres de hosts, versiones de software, y métricas de negocio.
+    severity: medium
+    context: external
+    confidence: medium
+    tags: [prometheus, devops, monitoring, info-disclosure]
+    match:
+      logic: or
+      banners: ["Prometheus"]
+      http_paths: ["/metrics", "/-/healthy", "/-/ready"]
+    remediation: >
+      Agregar autenticación Basic Auth via reverse proxy (nginx/Caddy).
+      Restringir scraping a rangos IP internos con firewall.
+      Separar endpoint de métricas del endpoint de administración.
+
+  - id: RR-058
+    name: Grafana Dashboard Expuesto
+    description: >
+      Panel Grafana accesible. Acceso anónimo puede revelar métricas internas,
+      configuraciones de datasources (incluyendo credenciales) y alertas.
+    severity: high
+    context: external
+    confidence: high
+    tags: [grafana, devops, monitoring]
+    match:
+      logic: or
+      banners: ["Grafana"]
+      http_paths: ["/api/health", "/login", "/api/datasources"]
+    remediation: >
+      Deshabilitar acceso anónimo (GF_AUTH_ANONYMOUS_ENABLED=false).
+      Habilitar OAuth/SAML con MFA. Restringir API keys y rotar periódicamente.
+      Auditar datasources: nunca almacenar credenciales en texto claro.
+
+  - id: RR-058b
+    name: Consul Service Mesh Expuesto
+    description: >
+      HashiCorp Consul expuesto. Permite enumeración de todos los servicios,
+      nodos, health checks y en versiones antiguas registro de servicios sin auth.
+      Acceso a Consul equivale al inventario completo de la infraestructura.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.1
+    tags: [consul, devops, service-mesh, secrets]
+    match:
+      logic: or
+      ports: [8500, 8501, 8600]
+      banners: ["Consul"]
+      http_paths: ["/v1/catalog/services", "/v1/agent/members", "/v1/kv/"]
+    remediation: >
+      Habilitar ACL system en Consul. Requerir mTLS entre agentes (verify_incoming,
+      verify_outgoing). Bloquear puerto 8500 en el perímetro. Usar 8501 solo con TLS.
+      Restringir DNS Consul (8600) a resolvers internos.
+
+  - id: RR-058c
+    name: Argo CD Expuesto
+    description: >
+      Argo CD (GitOps controller para Kubernetes) accesible. Acceso permite
+      ver y modificar deployments, secrets sincronizados y acceso al cluster.
+    severity: critical
+    context: external
+    confidence: high
+    tags: [argocd, kubernetes, devops, gitops]
+    match:
+      logic: and
+      ports: [8080, 8443]
+      banners: ["Argo CD", "argocd-server"]
+      http_paths: ["/api/v1/applications", "/healthz"]
+    remediation: >
+      Deshabilitar acceso anónimo. Habilitar SSO (Dex + OIDC). Configurar RBAC
+      de Argo CD con roles mínimos. Exponer solo via ingress con autenticación.
+      Rotar admin password en el primer deploy.
+
+  - id: RR-058d
+    name: Apache Airflow Web UI Expuesto
+    description: >
+      Airflow DAG management UI accesible. Permite ver y ejecutar DAGs,
+      ver variables y conexiones (con credenciales de bases de datos y APIs).
+    severity: critical
+    context: external
+    confidence: high
+    tags: [airflow, devops, data-engineering, secrets]
+    match:
+      logic: and
+      ports: [8080]
+      banners: ["Airflow"]
+      http_paths: ["/api/v1/dags", "/health", "/login"]
+    remediation: >
+      Habilitar AUTH_BACKEND con RBAC. Nunca exponer directamente.
+      Usar secrets backend (Vault, AWS Secrets Manager) en lugar de variables
+      Airflow para credenciales. Restringir acceso via VPN.
+
+  - id: RR-058e
+    name: Portainer Docker Management Expuesto
+    description: >
+      Portainer UI de gestión de contenedores accesible. Permite crear,
+      modificar y ejecutar contenedores con privilegios completos.
+    severity: critical
+    context: external
+    confidence: high
+    tags: [portainer, docker, devops, rce]
+    match:
+      logic: and
+      ports: [9000, 9443, 8000]
+      banners: ["Portainer"]
+      http_paths: ["/api/status", "/#!/init/admin"]
+    remediation: >
+      Proteger Portainer detrás de VPN. Usar HTTPS (9443) únicamente.
+      Habilitar MFA. Crear equipos con permisos mínimos.
+      Considerar Portainer Edge Agent para entornos remotos.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 3 — Data Science y Notebooks
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-059
+    name: Jupyter Notebook / Lab Sin Autenticación
+    description: >
+      Jupyter Notebook o JupyterLab accesible sin token ni contraseña.
+      Permite ejecución de código Python/R arbitrario en el servidor,
+      acceso al filesystem y credenciales de cloud en variables de entorno.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 10.0
+    tags: [jupyter, data-science, rce, exposure]
+    match:
+      logic: and
+      ports: [8888, 8889, 8890]
+      banners: ["Jupyter", "notebook_version", "JupyterLab"]
+      http_paths: ["/api/kernels", "/tree", "/lab"]
+    remediation: >
+      Jamás iniciar Jupyter con --no-browser --ip=0.0.0.0 sin token.
+      Configurar contraseña: jupyter notebook password. Usar JupyterHub con
+      autenticación OAuth para equipos. Exponer solo via SSH tunnel o VPN.
+      Revisar variables de entorno con credenciales cloud (AWS_ACCESS_KEY, etc.).
+    references:
+      - "Multiple cryptomining incidents via exposed Jupyter 2019-2023"
+
+  - id: RR-059b
+    name: MLflow Tracking Server Expuesto
+    description: >
+      MLflow server accesible. Puede exponer artefactos de modelos ML,
+      datasets, hiperparámetros y rutas a almacenamiento cloud.
+    severity: medium
+    context: external
+    confidence: medium
+    tags: [mlflow, data-science, ml]
+    match:
+      logic: and
+      ports: [5000]
+      banners: ["MLflow"]
+      http_paths: ["/api/2.0/mlflow/experiments/list"]
+    remediation: >
+      Agregar reverse proxy con autenticación. Restringir a red de data science.
+      Usar MLflow con backend store autenticado (no SQLite local).
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 4 — Message Brokers y Big Data
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-060
+    name: Memcached Expuesto — Amplificación y Robo de Datos
+    description: >
+      Memcached sin autenticación. Permite leer/escribir datos en caché y
+      puede ser abusado en ataques de amplificación DDoS (factor x50,000 UDP).
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.8
+    tags: [memcached, database, cache, ddos]
+    match:
+      logic: or
+      ports: [11211]
+      services: [memcache]
+      banners: ["STORED", "END\r\n"]
+    remediation: >
+      Escuchar solo en localhost: memcached -l 127.0.0.1. Habilitar SASL auth.
+      Bloquear UDP 11211 en firewall perimetral (vector de amplificación DDoS).
+    references:
+      - "GitHub DDoS 2018 via Memcached amplification"
+
+  - id: RR-061
+    name: Apache Kafka Broker Expuesto
+    description: >
+      Kafka broker accesible sin autenticación. Permite leer o inyectar eventos
+      en todos los topics, potencial robo masivo de datos de negocio o envenenamiento
+      de pipelines de datos.
+    severity: high
+    context: external
+    confidence: medium
+    tags: [kafka, bigdata, broker]
+    match:
+      logic: or
+      ports: [9092, 9093, 9094]
+    remediation: >
+      Habilitar SASL/SCRAM-SHA-512 para clientes. TLS en todos los listeners.
+      Configurar ACLs de Kafka (kafka-acls.sh). Restringir a red de microservicios.
+      Separar listeners internos de externos (PLAINTEXT vs SSL).
+
+  - id: RR-062
+    name: Apache Zookeeper Expuesto
+    description: >
+      Zookeeper expuesto permite administración completa de clusters Kafka,
+      HBase y otros. Un atacante puede leer configuración, credentials y
+      provocar corrupción del cluster.
+    severity: critical
+    context: external
+    confidence: high
+    tags: [zookeeper, bigdata, kafka]
+    match:
+      logic: or
+      ports: [2181, 2182]
+      banners: ["imok", "Zookeeper"]
+    remediation: >
+      Activar ACLs Zookeeper con digest o Kerberos. Habilitar TLS con
+      ssl.clientAuth=need. Aislar en red backend. Migrar a KRaft (Kafka sin Zookeeper)
+      si es posible.
+
+  - id: RR-063
+    name: RabbitMQ Management API Expuesta
+    description: >
+      RabbitMQ accesible. Credenciales por defecto guest:guest con acceso
+      localhost permiten escalar a admin en versiones mal configuradas.
+      Exposición de mensajes y posibilidad de inyectar en queues.
+    severity: high
+    context: external
+    confidence: high
+    tags: [rabbitmq, broker, credentials]
+    match:
+      logic: or
+      ports: [5672, 15672, 15671, 5671]
+      banners: ["AMQP", "RabbitMQ"]
+      http_paths: ["/api/overview", "/api/vhosts"]
+    remediation: >
+      Cambiar credenciales guest. Deshabilitar usuario guest para acceso remoto.
+      Habilitar TLS en 5671 y 15671. Implementar vhosts con permisos por aplicación.
+      Restringir Management UI a IPs de operaciones.
+
+  - id: RR-064
+    name: Redis Expuesto Sin Autenticación
+    description: >
+      Redis accesible sin contraseña. Permite leer/escribir todas las claves,
+      ejecutar comandos (CONFIG SET, SLAVEOF) para escribir archivos arbitrarios
+      o establecer persistencia (cron/SSH authorized_keys).
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.8
+    tags: [redis, database, cache, rce]
+    match:
+      logic: or
+      ports: [6379, 6380]
+      banners: ["-NOAUTH", "+PONG", "+OK"]
+    remediation: >
+      Configurar requirepass con contraseña larga (>32 chars). Deshabilitar
+      comandos peligrosos: rename-command CONFIG "". Escuchar solo en localhost
+      o red privada. Habilitar TLS con tls-port. Usar Redis 7+ con ACL system.
+    references:
+      - "CVE-2022-0543 (Redis sandbox escape)"
+
+  - id: RR-065
+    name: Elasticsearch Expuesto Sin Autenticación
+    description: >
+      Elasticsearch abierto al público. Sin X-Pack Security, cualquier atacante
+      puede robar, modificar o borrar todos los índices sin autenticación.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.8
+    tags: [elasticsearch, database, bigdata]
+    match:
+      logic: or
+      ports: [9200, 9300]
+      http_paths: ["/_cluster/health", "/_cat/indices", "/_nodes"]
+    remediation: >
+      Habilitar Elasticsearch Security (xpack.security.enabled: true).
+      Configurar TLS entre nodos. Crear usuarios con roles mínimos.
+      Restringir puertos 9200/9300 a red de aplicación.
+      Auditar índices públicos regularmente.
+
+  - id: RR-066
+    name: Hadoop HDFS Expuesto
+    description: >
+      Nodos Hadoop expuestos. El NameNode Web UI (50070/9870) expone
+      metadatos y permite descargar bloques de datos del cluster.
+    severity: critical
+    context: external
+    confidence: high
+    tags: [hadoop, bigdata, hdfs]
+    match:
+      logic: or
+      ports: [50010, 50020, 50090, 50070, 9870, 8088, 8042]
+      http_paths: ["/webhdfs/v1/", "/jmx?qry=Hadoop"]
+    remediation: >
+      Configurar autenticación Kerberos para HDFS. Habilitar HDFS encryption zones.
+      Proteger mediante firewall. Deshabilitar WebHDFS si no es necesario.
+      Separar red de administración Hadoop de redes de usuario.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 5 — Management Interfaces y Out-of-Band
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-070
+    name: HP iLO — Interfaz Out-of-Band Expuesta
+    description: >
+      HP Integrated Lights-Out expuesta. Acceso a nivel hardware del servidor:
+      consola remota, power control, acceso BIOS/firmware. Vulnerabilidades
+      críticas frecuentes en versiones sin parchear.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [ilo, oob, management, hardware]
+    match:
+      logic: or
+      banners: ["iLO", "Integrated Lights-Out", "HP iLO"]
+      http_paths: ["/json/login_session", "/rest/v1/systems"]
+    remediation: >
+      Mover iLO a VLAN de administración OOB completamente aislada.
+      Habilitar Single Sign-On solo desde hosts de administración.
+      Parchear firmware iLO regularmente (vulnerabilidades críticas frecuentes).
+      Deshabilitar protocolos legacy (IPMI sobre LAN si no es necesario).
+    references:
+      - "CVE-2017-12542 (iLO4 authentication bypass)"
+      - "CVE-2021-29203"
+
+  - id: RR-071
+    name: Dell iDRAC — Interfaz Out-of-Band Expuesta
+    description: >
+      Dell iDRAC expuesto. Acceso similar a iLO: consola virtual, reboot,
+      reinstalación de OS remota y acceso completo al hardware.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [idrac, oob, management, hardware]
+    match:
+      logic: or
+      banners: ["iDRAC", "Dell iDRAC", "iDRAC7", "iDRAC8", "iDRAC9"]
+      http_paths: ["/restgui/start.html", "/redfish/v1/Systems"]
+    remediation: >
+      Aislar en VLAN de hardware management sin ruta a internet.
+      Actualizar firmware iDRAC. Cambiar credenciales por defecto (root/calvin).
+      Deshabilitar IPMI sobre LAN si no se usa activamente.
+    references:
+      - "CVE-2021-21514 (iDRAC path traversal)"
+
+  - id: RR-072
+    name: Webmin / Virtualmin Expuesto
+    description: >
+      Panel de administración Linux Webmin accesible. Historial de
+      vulnerabilidades RCE críticas incluyendo backdoor en versión comprometida.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [webmin, management, rce]
+    match:
+      logic: or
+      banners: ["MiniServ", "Webmin"]
+      http_paths: ["/session_login.cgi", "/webmin_search.cgi"]
+    remediation: >
+      Restringir por firewall a IPs confiables. Habilitar MFA (Google Authenticator).
+      Actualizar a versión actual (la 1.890 tenía backdoor). Usar SSL obligatorio.
+    references:
+      - "CVE-2019-15107 (Webmin backdoor RCE)"
+
+  - id: RR-073
+    name: cPanel / WHM Expuesto
+    description: >
+      Panel de control de hosting cPanel o WHM accesible. Versiones desactualizadas
+      tienen vulnerabilidades RCE y escalada de privilegios.
+    severity: high
+    context: external
+    confidence: high
+    tags: [cpanel, management, hosting]
+    match:
+      logic: or
+      banners: ["cPanel", "WHM"]
+      http_paths: ["/cpsess", ":2082", ":2083", ":2086", ":2087"]
+    remediation: >
+      Mantener cPanel actualizado con auto-updates. Habilitar MFA obligatorio.
+      Usar certificados TLS válidos. Restringir acceso WHM a IPs de administración.
+
+  - id: RR-074
+    name: VMware ESXi / vCenter Expuesto
+    description: >
+      Interfaz vSphere ESXi o vCenter accesible. Vulnerabilidades de RCE son
+      explotadas activamente por ransomware (ESXiArgs) y APTs. Comprometer
+      vCenter equivale a controlar toda la infraestructura virtualizada.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 10.0
+    tags: [vmware, esxi, vcenter, virtualization, ransomware]
+    match:
+      logic: or
+      banners: ["VMware ESXi", "vCenter", "vSphere", "VMware"]
+      http_paths: ["/ui/", "/sdk", "/mob/", "/vsphere-client/"]
+    remediation: >
+      Jamás exponer ESXi/vCenter a internet. Proteger detrás de VPN estricta.
+      Aplicar parches de seguridad VMware inmediatamente al publicarse.
+      Deshabilitar SLP (puerto 427) para mitigar ESXiArgs.
+      Habilitar vSphere Authentication Proxy con MFA.
+    references:
+      - "CVE-2021-21985 (vCenter RCE)"
+      - "CVE-2021-22005"
+      - "ESXiArgs ransomware campaign 2023"
+
+  - id: RR-075
+    name: Proxmox VE Expuesto
+    description: >
+      Panel de Virtualización Proxmox accesible. Acceso permite gestión
+      completa de VMs y contenedores LXC del cluster.
+    severity: high
+    context: external
+    confidence: high
+    tags: [proxmox, virtualization]
+    match:
+      logic: or
+      ports: [8006]
+      banners: ["Proxmox VE", "PVEAuthCookie"]
+      http_paths: ["/api2/json/version", "/api2/json/cluster/status"]
+    remediation: >
+      Configurar Fail2Ban para intentos fallidos de login. Restringir IP de
+      administración en las reglas del firewall de Proxmox. Habilitar MFA
+      con TOTP. Usar Proxmox Backup Server con autenticación separada.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 6 — Security Appliances y Redes
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-080
+    name: FortiGate / FortiOS Management Expuesto
+    description: >
+      Panel de administración Fortinet o SSL-VPN expuesto. Path traversal y
+      RCE han sido explotados activamente por APTs. El SSL-VPN de FortiGate
+      ha sido uno de los vectores más usados en 2022-2024.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [fortinet, vpn, firewall, apt]
+    match:
+      logic: or
+      banners: ["FortiGate", "Fortinet", "FortiOS"]
+      http_paths: ["/remote/login", "/api/v2/cmdb/system/status", "/login"]
+    remediation: >
+      Deshabilitar HTTPS management en interfaces WAN. Aplicar parches FortiOS
+      inmediatamente (vulns críticas en SSL-VPN). Habilitar MFA para admins.
+      Revisar logs de acceso SSL-VPN para IOCs de APT.
+    references:
+      - "CVE-2022-40684 (FortiOS auth bypass)"
+      - "CVE-2023-27997 (SSL-VPN heap overflow)"
+      - "CVE-2024-21762"
+
+  - id: RR-081
+    name: Palo Alto GlobalProtect Expuesto
+    description: >
+      Portal GlobalProtect expuesto. Objetivo de APTs con vulnerabilidades
+      de command injection y autenticación bypass en PAN-OS recientes.
+    severity: high
+    context: external
+    confidence: high
+    cvss_base: 10.0
+    tags: [paloalto, vpn, firewall, apt]
+    match:
+      logic: or
+      banners: ["GlobalProtect", "Palo Alto Networks", "PAN-OS"]
+      http_paths: ["/global-protect/login.esp", "/ssl-vpn/login.esp"]
+    remediation: >
+      Aplicar parches PAN-OS inmediatamente. Habilitar MFA robusto (no solo OTP).
+      Activar Threat Prevention para el portal GP. Monitorear acceso a
+      /global-protect/getconfig.esp como IOC de explotación.
+    references:
+      - "CVE-2024-3400 (PAN-OS command injection, CVSS 10.0)"
+
+  - id: RR-082
+    name: Cisco ASA / FTD Expuesto
+    description: >
+      Cisco ASA o Firepower Threat Defense detectado. Vulnerabilidades en
+      WebVPN y AnyConnect han sido explotadas por actores de estado.
+    severity: high
+    context: external
+    confidence: high
+    tags: [cisco, vpn, firewall, asa]
+    match:
+      logic: or
+      banners: ["Cisco ASA", "Cisco ASDM", "AnyConnect", "Cisco FTD"]
+      http_paths: ["/+CSCOE+/logon.html", "/+CSCOU+/"]
+    remediation: >
+      Deshabilitar administración ASDM en interfaces externas. Actualizar
+      firmware ASA/FTD regularmente. Habilitar MFA para AnyConnect.
+      Revisar CVEs de WebVPN activos.
+    references:
+      - "CVE-2023-20269 (ASA VPN brute force)"
+
+  - id: RR-083
+    name: OpenVPN Server Detectado
+    description: >
+      Puerto OpenVPN detectado. Por sí mismo es un VPN legítimo, pero versiones
+      no parcheadas o con configuración débil (sin tls-auth, certificados expirados)
+      son vulnerables.
+    severity: low
+    context: external
+    confidence: low
+    tags: [openvpn, vpn]
+    match:
+      logic: or
+      ports: [1194]
+    remediation: >
+      Usar tls-crypt (más seguro que tls-auth). Deshabilitar cipher suites débiles.
+      Habilitar verificación de certificado cliente estricta.
+      Actualizar OpenVPN regularmente.
+
+  - id: RR-084
+    name: WireGuard VPN Detectado
+    description: >
+      Puerto UDP WireGuard detectado. WireGuard no responde a paquetes
+      no autenticados (stealth), pero el puerto abierto confirma la existencia
+      del servidor. Verificar que la configuración use keys rotativas.
+    severity: info
+    context: external
+    confidence: low
+    tags: [wireguard, vpn, info]
+    match:
+      logic: or
+      ports: [51820, 51821]
+    remediation: >
+      WireGuard es seguro por diseño. Verificar rotación de claves PreSharedKey.
+      Considerar cambiar puerto por defecto. Confirmar que no hay peers
+      con AllowedIPs=0.0.0.0/0 sin necesidad.
+
+  - id: RR-085
+    name: MikroTik RouterOS / Winbox Expuesto
+    description: >
+      MikroTik Winbox (8291) o WebFig expuesto. Altamente atacado por botnets
+      (Meris) y explotado via CVE-2018-14847 para extraer credenciales.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.1
+    tags: [mikrotik, router, network, botnet]
+    match:
+      logic: or
+      ports: [8291, 8728, 8729]
+      banners: ["MikroTik", "RouterOS"]
+    remediation: >
+      Deshabilitar Winbox/WebFig en interfaces WAN. Usar solo en VLAN
+      de administración. Actualizar RouterOS (CVE-2018-14847 parchado en 6.42.1).
+      Cambiar puertos de management. Revisar reglas de firewall RouterOS.
+    references:
+      - "CVE-2018-14847 (Winbox credential extraction)"
+      - "Meris botnet 2021"
+
+  - id: RR-086
+    name: F5 BIG-IP TMUI Expuesto
+    description: >
+      Traffic Management User Interface de F5 expuesta. CVE-2020-5902 permite
+      RCE sin autenticación y fue explotado masivamente horas después de publicarse.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 10.0
+    tags: [f5, bigip, firewall, rce]
+    match:
+      logic: or
+      banners: ["BIG-IP", "F5 Networks", "F5"]
+      http_paths: ["/tmui/login.jsp", "/mgmt/tm/sys/version"]
+    remediation: >
+      Aislar TMUI completamente de redes no confiables (no accesible desde internet).
+      Aplicar parches F5 inmediatamente. Usar iControl REST solo desde
+      redes de gestión. Deshabilitar TMUI si no se necesita externamente.
+    references:
+      - "CVE-2020-5902 (BIG-IP TMUI RCE, CVSS 10.0)"
+      - "CVE-2022-1388"
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 7 — ICS / SCADA / OT (Ampliada)
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-090
+    name: Android Debug Bridge (ADB) Expuesto
+    description: >
+      ADB habilitado por red. Permite shell remoto sin contraseña en cualquier
+      dispositivo Android (TV, IoT, móvil). Vector de cryptomining y espionaje.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.8
+    tags: [adb, android, iot, rce]
+    match:
+      logic: or
+      ports: [5555]
+      banners: ["CNXN", "host::"]
+    remediation: >
+      Deshabilitar ADB TCP: adb disconnect && adb kill-server. Implementar
+      firewall en dispositivos Android. Usar solo ADB USB en desarrollo.
+      Habilitar developer options solo durante desarrollo activo.
+
+  - id: RR-091
+    name: MQTT Broker Sin Autenticación
+    description: >
+      Broker MQTT IoT accesible (Mosquitto, EMQX, HiveMQ). Sin autenticación
+      permite suscribirse a todos los topics (#), leyendo telemetría física,
+      sensores y eventos de sistemas de control.
+    severity: high
+    context: both
+    confidence: medium
+    tags: [mqtt, iot, telemetria, ics]
+    match:
+      logic: or
+      ports: [1883, 8883, 8084]
+      services: [mqtt]
+    remediation: >
+      Requerir usuario/contraseña en broker MQTT (password_file en Mosquitto).
+      Usar TLS en puerto 8883. Implementar ACLs por topic.
+      Migrar a MQTT 5.0 con enhanced authentication. Aislar en VLAN IoT.
+
+  - id: RR-092
+    name: Cámara IP / RTSP Stream Expuesto
+    description: >
+      Real Time Streaming Protocol expuesto. Acceso a streams de cámaras
+      de seguridad internas sin autenticación. Riesgo de espionaje y
+      reconocimiento del entorno físico.
+    severity: high
+    context: external
+    confidence: medium
+    tags: [rtsp, cctv, iot, privacy]
+    match:
+      logic: or
+      ports: [554, 8554, 10554]
+      services: [rtsp]
+      banners: ["RTSP/1.0", "Server: DSS/", "Dahua", "Hikvision"]
+    remediation: >
+      Jamás exponer cámaras IP al perímetro. Configurar NVR en VLAN de seguridad
+      aislada. Cambiar credenciales por defecto (admin/admin en Hikvision/Dahua).
+      Usar VPN para acceso remoto a NVR. Aplicar firmware updates.
+
+  - id: RR-093
+    name: Modbus/TCP — Protocolo ICS Expuesto
+    description: >
+      Modbus TCP expuesto. Sin autenticación por diseño. Permite lectura y
+      escritura de registros en PLCs, controladores industriales y sistemas
+      de automatización. Riesgo de sabotaje físico.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 10.0
+    tags: [modbus, ics, scada, ot]
+    match:
+      logic: or
+      ports: [502]
+    remediation: >
+      Implementar Air Gap o Data Diode entre red OT e IT.
+      Usar firewall industrial (Purdue Model). Desplegar IDS específico OT
+      (Claroty, Dragos, Nozomi). Si se requiere conectividad, usar
+      Modbus over TLS con gateway industrial.
+
+  - id: RR-093b
+    name: DNP3 — Protocolo SCADA Expuesto
+    description: >
+      DNP3 (Distributed Network Protocol 3) expuesto. Usado en utilities
+      (agua, energía, gas). Sin autenticación en versiones antiguas.
+      Vector de ataques a infraestructura crítica.
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.0
+    tags: [dnp3, scada, ics, ot, utilities]
+    match:
+      logic: or
+      ports: [20000]
+    remediation: >
+      Implementar DNP3 Secure Authentication v5 (SA5). Aislar en red OT
+      con firewall perimetral industrial. Monitorear con IDS especializado OT.
+      Notificar al CERT-OT nacional si está expuesto en internet.
+
+  - id: RR-093c
+    name: BACnet — Protocolo Building Automation Expuesto
+    description: >
+      BACnet (Building Automation and Control Networks) expuesto via UDP.
+      Controla HVAC, ascensores, iluminación y acceso físico en edificios inteligentes.
+      Sin autenticación por defecto.
+    severity: high
+    context: both
+    confidence: high
+    tags: [bacnet, ics, building-automation, ot]
+    match:
+      logic: or
+      ports: [47808]
+    remediation: >
+      Implementar BACnet/SC (Secure Connect) con TLS y autenticación.
+      Aislar la red BACnet de la red corporativa. Firewall industrial
+      que permita solo tráfico BACnet autorizado.
+
+  - id: RR-093d
+    name: OPC-UA — Plataforma Industrial Expuesta
+    description: >
+      OPC Unified Architecture expuesto. Protocolo estándar de industria 4.0
+      para comunicación M2M. Sin autenticación o con certificados self-signed
+      no validados, permite lectura/escritura de variables industriales.
+    severity: high
+    context: both
+    confidence: high
+    tags: [opcua, ics, industry40, ot]
+    match:
+      logic: or
+      ports: [4840, 4841, 4843]
+    remediation: >
+      Habilitar OPC-UA Security Mode = SignAndEncrypt. Usar certificados
+      de CA interna para autenticación mutua. Implementar OPC-UA Firewall
+      proxy que valide estructura del protocolo.
+
+  - id: RR-093e
+    name: EtherNet/IP (Rockwell/Allen-Bradley) Expuesto
+    description: >
+      EtherNet/IP expuesto, protocolo de Rockwell Automation para PLCs
+      (Allen-Bradley, ControlLogix). Sin seguridad de sesión en versiones
+      antiguas. Permite lectura y escritura de tags de PLC.
+    severity: critical
+    context: both
+    confidence: high
+    tags: [ethernetip, rockwell, ics, ot, plc]
+    match:
+      logic: or
+      ports: [44818, 2222]
+    remediation: >
+      Aislar PLCs en red OT con firewall industrial (Rockwell STRATIX).
+      Usar CIP Security (TLS/DTLS sobre EtherNet/IP). Implementar
+      Rockwell FactoryTalk AssetCentre para auditoría.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 8 — Bases de Datos
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-100
+    name: Oracle Database Listener Expuesto
+    description: >
+      Oracle TNS Listener expuesto al perímetro. Permite enumeración de
+      instancias (SID) y es objetivo de ataques de fuerza bruta y exploits
+      de TNS Poison.
+    severity: high
+    context: external
+    confidence: high
+    tags: [oracle, database]
+    match:
+      logic: or
+      ports: [1521, 1522, 1526]
+      services: [oracle]
+      banners: ["TNS", "(DESCRIPTION="]
+    remediation: >
+      Filtrar 1521 en firewall perimetral. Habilitar Valid Node Checking (VNC).
+      Configurar sqlnet.ora con SQLNET.ALLOWED_LOGON_VERSION_SERVER=12.
+      Usar Oracle Connection Manager para proxy autenticado.
+    references:
+      - "CVE-2012-1675 (TNS Poison)"
+
+  - id: RR-101
+    name: CouchDB Expuesto — Admin Party
+    description: >
+      CouchDB accesible. "Admin Party" (sin auth) permite crear bases de datos,
+      leer todos los documentos y ejecutar funciones reduce (JavaScript).
+    severity: high
+    context: external
+    confidence: high
+    tags: [couchdb, database, nosql]
+    match:
+      logic: or
+      ports: [5984, 6984]
+      services: [couchdb]
+      banners: ["CouchDB", "\"couchdb\":\"Welcome\""]
+      http_paths: ["/_utils/", "/_all_dbs"]
+    remediation: >
+      Desactivar Admin Party creando admin: curl -X PUT http://localhost:5984/_config/admins/admin -d '"password"'.
+      Habilitar HTTPS. Restringir bind_address a localhost o IP interna.
+
+  - id: RR-102
+    name: Cassandra Expuesta
+    description: >
+      Nodo Apache Cassandra expuesto. Sin autenticación, acceso completo
+      a todos los keyspaces y datos. Puerto JMX (7199) puede permitir
+      RCE via MBeans si está abierto.
+    severity: high
+    context: external
+    confidence: high
+    tags: [cassandra, database, nosql]
+    match:
+      logic: or
+      ports: [9042, 9160, 7199]
+    remediation: >
+      Habilitar authenticator: PasswordAuthenticator en cassandra.yaml.
+      Configurar authorizer: CassandraAuthorizer. Restringir JMX (7199)
+      a localhost. Usar TLS para cliente-nodo y nodo-nodo.
+
+  - id: RR-103
+    name: MongoDB Expuesto Sin Autenticación
+    description: >
+      MongoDB accesible. Sin --auth, cualquier conexión tiene acceso total
+      a todas las bases de datos. Decenas de miles de DBs comprometidas
+      en campañas de ransom MongoDB (2017-2020).
+    severity: critical
+    context: both
+    confidence: high
+    cvss_base: 9.8
+    tags: [mongodb, database, nosql, ransomware]
+    match:
+      logic: or
+      ports: [27017, 27018, 27019]
+      services: [mongodb]
+    remediation: >
+      Habilitar --auth en mongod.conf: security.authorization: enabled.
+      Crear usuarios con roles mínimos. Cambiar bindIp de 0.0.0.0 a
+      127.0.0.1 o IP específica. Habilitar TLS. Deshabilitar HTTP interface
+      legacy (28017).
+    references:
+      - "MongoDB ransom campaigns 2017 (~28,000 DBs)"
+
+  - id: RR-104
+    name: PostgreSQL Expuesto
+    description: >
+      PostgreSQL accesible por red. Configuración por defecto puede permitir
+      autenticación trust desde ciertas redes definidas en pg_hba.conf.
+    severity: high
+    context: external
+    confidence: high
+    tags: [postgresql, database]
+    match:
+      logic: or
+      ports: [5432]
+      services: [postgresql]
+      banners: ["PostgreSQL", "pg_"]
+    remediation: >
+      Restringir pg_hba.conf a IPs de aplicación específicas. Usar
+      autenticación scram-sha-256 (no md5 ni trust). Habilitar TLS con
+      ssl=on y sslmode=verify-full en clientes. Cambiar puerto si es posible.
+
+  - id: RR-105
+    name: MySQL / MariaDB Expuesto
+    description: >
+      MySQL o MariaDB accesibles por red. Usuario root con acceso remoto
+      y contraseña débil/vacía es un error de configuración frecuente.
+    severity: high
+    context: external
+    confidence: high
+    tags: [mysql, database]
+    match:
+      logic: or
+      ports: [3306, 3307]
+      services: [mysql]
+      banners: ["mysql_native_password", "MariaDB"]
+    remediation: >
+      Revocar acceso root remoto: DELETE FROM mysql.user WHERE User='root' AND Host!='localhost'.
+      Crear usuarios específicos por aplicación con permisos mínimos.
+      Habilitar require_secure_transport=ON. Filtrar 3306 en firewall.
+
+  - id: RR-106
+    name: Microsoft SQL Server (MSSQL) Expuesto
+    description: >
+      MSSQL accesible por red. Cuenta 'sa' habilitada con contraseña débil
+      es el vector clásico. xp_cmdshell puede proporcionar RCE al servidor.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [mssql, database, windows, rce]
+    match:
+      logic: or
+      ports: [1433, 1434]
+      services: [ms-sql-s]
+      banners: ["Microsoft SQL Server", "MSSQL"]
+    remediation: >
+      Deshabilitar cuenta 'sa' o cambiar contraseña compleja. Deshabilitar
+      xp_cmdshell. Usar Windows Authentication en lugar de SQL Auth.
+      Filtrar 1433 a IPs de app servers únicamente. Aplicar parches mensuales.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 9 — Backup & Storage
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-107
+    name: Veeam Backup Service Expuesto
+    description: >
+      Veeam Backup & Replication accesible por red. Vulnerabilidades críticas
+      recientes permiten RCE y extracción de credenciales de infraestructura.
+    severity: critical
+    context: external
+    confidence: high
+    cvss_base: 9.8
+    tags: [veeam, backup, rce]
+    match:
+      logic: or
+      ports: [9392, 9401]
+      banners: ["Veeam"]
+    remediation: >
+      Aplicar parches Veeam inmediatamente. Restringir acceso a consola
+      Veeam a IPs de administración. Usar Veeam Hardened Repository.
+    references:
+      - "CVE-2023-27532 (Veeam credential theft)"
+      - "CVE-2024-40711 (Veeam RCE)"
+
+  - id: RR-108
+    name: MinIO Object Storage Expuesto
+    description: >
+      MinIO (S3-compatible storage) accesible sin autenticación. Puede exponer
+      todos los buckets y objetos almacenados.
+    severity: critical
+    context: external
+    confidence: high
+    tags: [minio, storage, s3, backup]
+    match:
+      logic: and
+      ports: [9000, 9001]
+      banners: ["MinIO", "minio"]
+      http_paths: ["/minio/health/live", "/minio/health/ready"]
+    remediation: >
+      Nunca usar access key/secret key por defecto (minioadmin:minioadmin).
+      Habilitar TLS. Configurar políticas de bucket restrictivas.
+      Deshabilitar acceso anónimo a buckets.
+
+  # ════════════════════════════════════════════════════════════
+  # SECCIÓN 10 — Reglas de Detección Informativa
+  # ════════════════════════════════════════════════════════════
+
+  - id: RR-110
+    name: Servidor HTTP/HTTPS Detectado
+    description: >
+      Servicio web activo. Punto de partida para auditoría de versiones,
+      headers de seguridad, certificados TLS y configuración de aplicaciones.
+    severity: info
+    context: both
+    confidence: high
+    tags: [http, web, info, baseline]
+    match:
+      logic: and
+      ports: [80, 443, 8080, 8443, 8000, 8888, 8081, 8082]
+      services: [http, https, http-alt, https-alt]
+    remediation: >
+      Auditar headers de seguridad (CSP, HSTS, X-Frame-Options).
+      Verificar versiones de servidor web. Configurar TLS 1.2+ únicamente.
+      Revisar certificados (expiración, SANs, CA confiable).
+
+  - id: RR-111
+    name: Servidor SSH Detectado
+    description: >
+      SSH activo. Verificar versión del servidor, algoritmos de cifrado
+      admitidos y si permite autenticación por contraseña.
+    severity: info
+    context: both
+    confidence: high
+    tags: [ssh, info, baseline]
+    match:
+      logic: or
+      ports: [22, 2222]
+      services: [ssh]
+      banners: ["SSH-2.0", "SSH-1.99"]
+    remediation: >
+      Deshabilitar autenticación por contraseña (PasswordAuthentication no).
+      Usar únicamente SSH-2. Restringir algoritmos: KexAlgorithms curve25519-sha256,
+      Ciphers chauffeur chacha20-poly1305@openssh.com,aes256-gcm@openssh.com.
+      Implementar fail2ban o equivalente.
+
+  - id: RR-112
+    name: Puerto Abierto Sin Banner — Posible Honeypot o Proxy
+    description: >
+      Puerto abierto en rango alto o inusual que acepta conexiones TCP
+      pero no devuelve banner en 5 segundos. Puede indicar honeypot,
+      proxy transparente, puerto personalizado o servicio mal configurado.
+      NOTA: Regla de alta tasa de falsos positivos — usar solo como señal de investigación.
+    severity: info
+    context: both
+    confidence: low
+    tags: [honeypot, silent, investigation]
+    match:
+      logic: and
+      conditions:
+        - port_range: [1024, 65535]
+        - banner_empty: true
+        - response_time_ms_max: 5000
+        - excludes_services: [ssh, http, https, rdp, smb, ftp, smtp]
+    remediation: >
+      Investigar manualmente el servicio. Usar netstat/ss en el host para
+      identificar el proceso dueño del puerto. Determinar si es legítimo,
+      honeypot interno o servicio no documentado. No bloquear sin investigación previa.

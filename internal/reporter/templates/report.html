@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAPTOR RECON | AUDIT REPORT</title>
+    <style>
+{{ template "style.css" }}
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">RAPTOR RECON <span class="accent">| AUDIT REPORT</span></div>
+        <div class="meta">
+            <div class="meta-item"><span class="label">TARGET</span><span class="value">{{ .Target }}</span></div>
+            <div class="meta-item"><span class="label">DATE</span><span class="value">{{ .Timestamp }}</span></div>
+            <div class="meta-item"><span class="label">VERSION</span><span class="value">{{ .Version }}</span></div>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Top Cards -->
+        <section class="cards-grid">
+            <div class="card">
+                <div class="card-title">Discovered Subnets</div>
+                <div class="card-value" id="val-subnets">0</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Alive Hosts</div>
+                <div class="card-value" id="val-hosts">0</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Exposed Ports</div>
+                <div class="card-value" id="val-ports">0</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Vulnerabilities</div>
+                <div class="cve-stats">
+                    <span class="badge critical" title="Critical">C: <span id="val-crit">0</span></span>
+                    <span class="badge high" title="High">H: <span id="val-high">0</span></span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Executive Intelligence -->
+        <section class="panel" id="executive-intelligence">
+            <h2 class="panel-title">Executive Intelligence</h2>
+            <div class="exec-summary" id="exec-summary">
+                <!-- Populated by JS -->
+            </div>
+            <div class="exec-grid">
+                <div class="exec-chart-container">
+                    <canvas id="severityChart"></canvas>
+                </div>
+                <div class="exec-top-assets" id="top-assets-container">
+                    <h3 class="sub-title" style="margin-bottom: 1rem; color: var(--text-secondary); text-transform: uppercase; font-size: 0.85rem; letter-spacing: 1px;">Activos de Mayor Riesgo</h3>
+                    <div id="top-assets-list" class="top-assets-list"></div>
+                </div>
+            </div>
+            
+            <details id="network-context-container" style="margin-top: 1.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; padding: 1rem;">
+                <summary style="cursor: pointer; font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); letter-spacing: 1px; outline: none;">
+                    CONTEXTO DE RED Y DIRECCIONAMIENTO (L2/L3)
+                </summary>
+                <div class="cards-grid" style="grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); margin-top: 1rem;" id="network-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </details>
+            
+            <div id="delta-container" style="margin-top: 1.5rem; display: none;">
+                <h3 class="sub-title" style="margin-bottom: 1rem; color: var(--text-secondary); text-transform: uppercase; font-size: 0.85rem; letter-spacing: 1px;">Cambios de Baseline</h3>
+                <div class="cards-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));" id="delta-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <div id="pivot-container" style="margin-top: 1.5rem; display: none;">
+                <h3 class="sub-title" style="margin-bottom: 1rem; color: #f59e0b; text-transform: uppercase; font-size: 0.85rem; letter-spacing: 1px;">🔀 Proxy Pivot Findings</h3>
+                <div id="pivot-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Network Topology -->
+        <section class="panel topology-panel">
+            <h2 class="panel-title">Topología de Red</h2>
+            <div class="vis-wrapper" id="topology-wrapper" style="height: 500px; border: 1px solid var(--border-color); border-radius: 6px; background-color: var(--bg-card);">
+                <div id="vis-network" style="width: 100%; height: 100%;"></div>
+            </div>
+            <div style="text-align: center; margin-top: 1rem; color: var(--text-secondary); font-size: 0.85rem;" class="topology-hint">
+                <i>Interact with the graph: Click on an IP to expand/collapse its ports. Drag to move nodes. Scroll to zoom.</i>
+            </div>
+        </section>
+
+        <!-- Findings Matrix -->
+        <section class="panel">
+            <h2 class="panel-title">Findings Matrix</h2>
+            <div class="controls">
+                <input type="text" id="search-input" class="search-input" placeholder="Search by IP, Port, Service, CVE...">
+                <div class="filters" id="filters-container">
+                    <button class="filter-btn active" data-filter="all">All</button>
+                    <button class="filter-btn" data-filter="critical">Critical</button>
+                    <button class="filter-btn" data-filter="high">High</button>
+                    <button class="filter-btn" data-filter="medium">Medium</button>
+                    <button class="filter-btn" data-filter="low">Low</button>
+                    <button class="filter-btn" data-filter="info">Info</button>
+                    <button class="filter-btn export-btn" id="export-csv-btn">Export CSV <svg style="width:14px;height:14px;margin-left:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></button>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table id="findings-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 15%">Host (IP / DNS)</th>
+                            <th style="width: 10%">Puertos</th>
+                            <th style="width: 15%">Servicios & Banners</th>
+                            <th style="width: 20%">Web Discovery</th>
+                            <th style="width: 20%">Vulnerabilidades</th>
+                            <th style="width: 20%">Mitigaciones</th>
+                        </tr>
+                    </thead>
+                    <tbody id="findings-body">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <!-- Embedded Libraries (Base64 to avoid XSS linters) -->
+    <script type="text/javascript">
+        function b64ToUtf8(str) {
+            return decodeURIComponent(escape(window.atob(str)));
+        }
+        function loadB64Script(b64) {
+            var s = document.createElement('script');
+            s.text = b64ToUtf8(b64);
+            document.head.appendChild(s);
+        }
+        loadB64Script("{{ .ChartJSBase64 }}");
+        loadB64Script("{{ .VisJSBase64 }}");
+    </script>
+    
+    <!-- Inject JSON Data -->
+    <script>
+        var jsonDataRaw = b64ToUtf8("{{ .DataB64 }}");
+        window.raptorData = JSON.parse(jsonDataRaw);
+        
+        var deltaDataRaw = "{{ .DeltaB64 }}";
+        if (deltaDataRaw && deltaDataRaw !== "") {
+            window.raptorDelta = JSON.parse(b64ToUtf8(deltaDataRaw));
+        }
+
+        var pivotDataRaw = "{{ .PivotB64 }}";
+        if (pivotDataRaw && pivotDataRaw !== "") {
+            window.raptorPivot = JSON.parse(b64ToUtf8(pivotDataRaw));
+        }
+    </script>
+    
+    <script type="text/javascript">
+{{ template "script.js" }}
+    </script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Binaries and executables
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local reports and outputs
+raptor_results.json
+raptor_report.html
+raptor.log
+raptor_state.json
+raptor_sarif.json
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go specific
+vendor/
+
+# Tmp files
+*.tmp
+*.bak
+.env

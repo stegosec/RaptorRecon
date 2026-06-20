@@ -1,0 +1,11 @@
+id: L7-TELNET-BANNER
+name: "Telnet Protocol Detection"
+description: "Detecta pasivamente dispositivos y servidores Telnet tradicionales o de red."
+severity: info
+protocol: tcp
+port: 23
+matchers:
+  - type: regex
+    value: "(?i)(login:|password:|user:|telnet)"
+  - type: hex
+    value: "fffd" # IAC DO / IAC WILL telnet control sequence

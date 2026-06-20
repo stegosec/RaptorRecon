@@ -1,0 +1,11 @@
+id: L7-MSSQL-TDS
+name: "MSSQL TDS Pre-Login Request"
+description: "Detecta servidores MSSQL inyectando un paquete TDS Pre-Login y validando la cabecera binaria de respuesta."
+severity: info
+protocol: tcp
+port: 1433
+payloads:
+  - "1201002f0000010000001a00060100200001020021000103002200000400220001ff0a3200000000000000" # TDS Pre-Login packet
+matchers:
+  - type: hex
+    value: "0401" # TDS Tabular Response + EOM indicator typical in pre-login response

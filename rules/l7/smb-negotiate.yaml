@@ -1,0 +1,13 @@
+id: L7-SMB-NEGOTIATE
+name: "SMB1/2 Negotiate Protocol Request"
+description: "Detecta servidores SMB enviando un paquete NetBIOS + SMB Negotiate request y validando la firma mágica."
+severity: info
+protocol: tcp
+port: 445
+payloads:
+  - "00000054ff534d42720000000008014000000000000000000000000000003100000004ff00000000000100510000000000080000000000000000000000000000000000000000000000000000000000000000000000" # NetBIOS Length + SMB1 Negotiate Protocol
+matchers:
+  - type: hex
+    value: "fe534d42" # SMB2 Magic (\xfeSMB)
+  - type: hex
+    value: "ff534d42" # SMB1 Magic (\xffSMB)

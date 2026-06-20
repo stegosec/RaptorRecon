@@ -1,0 +1,16 @@
+id: L7-HTTP-OPEN-PROXY-8080
+name: "HTTP Open Proxy — Puerto 8080"
+description: >
+  Proxy HTTP en puerto 8080 que acepta peticiones CONNECT arbitrarias a destinos
+  externos sin autenticación. Un CONNECT exitoso a google.com:443 confirma que es
+  un Open Proxy abusable para SSRF, exfiltración de datos y bypass de perimetral.
+severity: critical
+protocol: tcp
+port: 8080
+payloads:
+  - "CONNECT google.com:443 HTTP/1.1\r\nHost: google.com:443\r\nUser-Agent: Mozilla/5.0\r\nProxy-Connection: keep-alive\r\n\r\n"
+matchers:
+  - type: regex
+    value: "HTTP/1\\.[01] 200"
+  - type: contains
+    value: "Connection established"

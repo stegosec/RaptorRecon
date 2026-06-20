@@ -1,0 +1,10 @@
+id: L7-FTP-BANNER
+name: "FTP Protocol Detection"
+description: "Detecta pasivamente servidores FTP mediante lectura de banners 220."
+severity: info
+protocol: tcp
+port: 21
+# Pasivo, sin payloads
+matchers:
+  - type: regex
+    value: "^220[ -].+(FTP|FileZilla|vsFTPd|ProFTPD|Pure-FTPd)"
