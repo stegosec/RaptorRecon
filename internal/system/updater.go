@@ -83,40 +83,50 @@ func CheckAndUpdate(currentVersion string) error {
 
 	// 3. Descargar el nuevo binario a un archivo temporal
 	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, expectedAssetName+".tmp")
 	
-	out, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	// Usamos CreateTemp para mitigar G304 (Inyección de Archivo)
+	out, err := os.CreateTemp(tmpDir, expectedAssetName+"-*.tmp")
 	if err != nil {
 		return fmt.Errorf("no se pudo crear el archivo temporal: %v", err)
+	}
+	tmpFile := out.Name()
+	
+	// El ejecutable necesita permisos +x. Gosec (G302) se queja de permisos > 0600, 
+	// pero al ser un binario es estrictamente necesario, de ahí la excepción justificada.
+	/* #nosec G302 */
+	if err := out.Chmod(0700); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("no se pudieron asignar permisos de ejecución: %v", err)
 	}
 
 	dlResp, err := client.Get(downloadURL)
 	if err != nil {
-		out.Close()
-		os.Remove(tmpFile)
+		_ = out.Close()
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("error descargando binario: %v", err)
 	}
 	defer dlResp.Body.Close()
 
 	if dlResp.StatusCode != http.StatusOK {
-		out.Close()
-		os.Remove(tmpFile)
+		_ = out.Close()
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("error al descargar, código HTTP: %d", dlResp.StatusCode)
 	}
 
 	// Copiar con LimitReader (protección de cordura, max 50MB)
 	lr := io.LimitReader(dlResp.Body, 50*1024*1024)
 	if _, err := io.Copy(out, lr); err != nil {
-		out.Close()
-		os.Remove(tmpFile)
+		_ = out.Close()
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("error escribiendo el binario temporal: %v", err)
 	}
-	out.Close() // Cerrar antes de reemplazar
+	_ = out.Close() // Cerrar antes de reemplazar
 
 	// 4. Reemplazo atómico del binario en ejecución
 	execPath, err := os.Executable()
 	if err != nil {
-		os.Remove(tmpFile)
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("no se pudo obtener la ruta del binario actual: %v", err)
 	}
 
@@ -126,7 +136,7 @@ func CheckAndUpdate(currentVersion string) error {
 		_ = os.Remove(oldPath) // Eliminar si existía de una actualización anterior
 		
 		if err := os.Rename(execPath, oldPath); err != nil {
-			os.Remove(tmpFile)
+			_ = os.Remove(tmpFile)
 			return fmt.Errorf("error al renombrar el ejecutable actual en uso: %v", err)
 		}
 		
@@ -139,7 +149,7 @@ func CheckAndUpdate(currentVersion string) error {
 	} else {
 		// En Unix, os.Rename suele ser atómico y permite sobreescribir el binario en uso.
 		if err := os.Rename(tmpFile, execPath); err != nil {
-			os.Remove(tmpFile)
+			_ = os.Remove(tmpFile)
 			return fmt.Errorf("error reemplazando el binario: %v", err)
 		}
 		fmt.Printf("[✓] ¡Actualización exitosa a v%s!\n", latestVersion)

@@ -1,4 +1,4 @@
-# 🦅 Raptor Recon - Advanced Attack Surface Management
+# 🦖 Raptor Recon - Advanced Attack Surface Management
 
 ![Release](https://img.shields.io/github/v/release/stegosec/RaptorRecon?style=for-the-badge&color=00f0ff)
 ![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)
